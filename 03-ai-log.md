@@ -4,7 +4,7 @@
 > **Branch:** `thaianh`  
 > **Tên nhóm:** `[Điền tên nhóm]`  
 > **Thành viên và email:** `[Điền đầy đủ]`  
-> **Người thực hiện:** Thái Anh — `[Điền email đăng ký]`
+> **Người thực hiện:** Thái Anh — `thaianh14042002@gmail.com`
 
 ## 1. Mục tiêu sử dụng AI
 
