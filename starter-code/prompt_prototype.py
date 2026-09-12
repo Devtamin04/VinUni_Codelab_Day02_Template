@@ -1,15 +1,4 @@
-"""
-Day 2 — AI Product Scoping (Vin Smart Future)
-Lightweight Prompt Boundary Prototyping (Starter Code)
-
-Instructions:
-    1. Define your strict SYSTEM_PROMPT below, detailing the operational boundaries.
-    2. Complete the TODO inside evaluate_prompt() using Google Gemini 2.5 SDK.
-    3. Define at least 2 adversarial test inputs designed to attack your boundaries.
-    4. Run this script: python3 prompt_prototype.py
-    5. Ensure the model output passes the safety assertions!
-"""
-
+# Họ và tên: <Nguyễn Văn Bảo> - <26ai.baonv@vinuni.edu.vn>
 import os
 import sys
 from typing import Any
