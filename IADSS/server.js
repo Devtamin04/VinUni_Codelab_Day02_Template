@@ -1,0 +1,1443 @@
+import 'dotenv/config';
+
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import express from 'express';
+import QRCode from 'qrcode';
+import {
+  FALLBACK_DRUGS,
+  createDatabase,
+  normalizeInput
+} from './src/db.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const JSQR_DIST_DIR = path.join(__dirname, 'node_modules', 'jsqr', 'dist');
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+const PASSWORD_HASH_ITERATIONS = 120000;
+const USER_RESET_PASSWORD = process.env.USER_RESET_PASSWORD ?? 'thaianh13042002';
+const AUTH_ROLES = new Set(['pharmacy', 'doctor', 'moh']);
+const REFERENCE_CATEGORIES = new Set(['drugs', 'drugClasses', 'antibiotics', 'antibioticClasses']);
+const PRESCRIPTION_STATUS = {
+  VALID: 'Valid',
+  PARTIALLY_DISPENSED: 'Partially Dispensed',
+  FULLY_DISPENSED: 'Fully Dispensed',
+  EXPIRED: 'Expired',
+  CANCELLED: 'Cancelled',
+  INVALID: 'Invalid'
+};
+const COMMON_DRUG_SUGGESTIONS = [
+  'Amoxicillin',
+  'Azithromycin',
+  'Cephalexin',
+  'Cefixime',
+  'Ciprofloxacin',
+  'Metformin',
+  'Amlodipine',
+  'Atorvastatin',
+  'Paracetamol',
+  'Ibuprofen',
+  'Omeprazole',
+  'Cetirizine'
+];
+const ICD10_SUGGESTIONS = [
+  { code: 'J02.9', label: 'Acute pharyngitis, unspecified', terms: ['sore throat', 'throat infection', 'pharyngitis', 'viem hong'] },
+  { code: 'J03.9', label: 'Acute tonsillitis, unspecified', terms: ['tonsillitis', 'viem amidan', 'amidan'] },
+  { code: 'J06.9', label: 'Acute upper respiratory infection, unspecified', terms: ['upper respiratory infection', 'uri', 'common cold', 'nhiem trung duong ho hap tren'] },
+  { code: 'J20.9', label: 'Acute bronchitis, unspecified', terms: ['bronchitis', 'viem phe quan'] },
+  { code: 'J18.9', label: 'Pneumonia, unspecified organism', terms: ['pneumonia', 'viem phoi'] },
+  { code: 'N39.0', label: 'Urinary tract infection, site not specified', terms: ['urinary tract infection', 'uti', 'nhiem trung duong tieu', 'viem duong tiet nieu'] },
+  { code: 'A09', label: 'Infectious gastroenteritis and colitis, unspecified', terms: ['gastroenteritis', 'diarrhea infection', 'tieu chay nhiem trung'] },
+  { code: 'L03.9', label: 'Cellulitis, unspecified', terms: ['cellulitis', 'skin infection', 'nhiem trung da'] },
+  { code: 'H66.9', label: 'Otitis media, unspecified', terms: ['otitis media', 'ear infection', 'viem tai giua'] },
+  { code: 'K04.7', label: 'Periapical abscess without sinus', terms: ['dental abscess', 'tooth abscess', 'ap xe rang'] }
+];
+const ANTIBIOTIC_HISTORY_WINDOW_DAYS = 180;
+const REPEAT_CLASS_WINDOW_DAYS = 90;
+const RISK_CLASS_RULES = [
+  {
+    allergyTerms: ['penicillin', 'amoxicillin', 'ampicillin', 'cloxacillin', 'beta-lactam', 'beta lactam'],
+    exactClasses: ['penicillin'],
+    relatedClasses: ['cephalosporin'],
+    message: 'Patient allergy history mentions penicillin/beta-lactam. Review before prescribing penicillins or cephalosporins.'
+  },
+  {
+    allergyTerms: ['cephalosporin', 'cefixime', 'cephalexin', 'cefuroxime', 'ceftriaxone'],
+    exactClasses: ['cephalosporin'],
+    relatedClasses: ['penicillin'],
+    message: 'Patient allergy history mentions cephalosporins. Review beta-lactam cross-risk before prescribing.'
+  },
+  {
+    allergyTerms: ['macrolide', 'azithromycin', 'clarithromycin', 'erythromycin'],
+    exactClasses: ['macrolide'],
+    relatedClasses: [],
+    message: 'Patient allergy history mentions macrolides. Review before prescribing this class.'
+  }
+];
+
+function normalizeReferenceCategory(category) {
+  if (category === 'antibiotics') {
+    return 'drugs';
+  }
+
+  if (category === 'antibioticClasses') {
+    return 'drugClasses';
+  }
+
+  return category;
+}
+
+function sanitizeUser(user) {
+  if (!user) {
+    return null;
+  }
+
+  const accountId = user.username;
+  const defaultHospitalId = `HOSP-${accountId}`;
+  const defaultPharmacyId = `PHARM-${accountId}`;
+  const defaultMohId = `MOH-${accountId}`;
+  const sanitized = {
+    id: user.id,
+    username: user.username,
+    accountId,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    createdAt: user.createdAt
+  };
+
+  if (user.role === 'pharmacy') {
+    sanitized.pharmacyId = user.pharmacyId || defaultPharmacyId;
+  }
+
+  if (user.role === 'doctor') {
+    sanitized.doctorId = accountId;
+    sanitized.hospitalId = user.hospitalId || defaultHospitalId;
+  }
+
+  if (user.role === 'moh') {
+    sanitized.mohId = user.mohId || defaultMohId;
+  }
+
+  return sanitized;
+}
+
+function getRoleIds(userInput) {
+  const username = userInput.username;
+  const hospitalId = normalizeInput(userInput.hospitalId) || `HOSP-${username}`;
+  const pharmacyId = normalizeInput(userInput.pharmacyId) || `PHARM-${username}`;
+  const mohId = normalizeInput(userInput.mohId) || `MOH-${username}`;
+
+  return {
+    doctorId: userInput.role === 'doctor' ? username : null,
+    hospitalId: userInput.role === 'doctor' ? hospitalId : null,
+    pharmacyId: userInput.role === 'pharmacy' ? pharmacyId : null,
+    mohId: userInput.role === 'moh' ? mohId : null
+  };
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, PASSWORD_HASH_ITERATIONS, 32, 'sha256').toString('hex');
+  return `pbkdf2$${PASSWORD_HASH_ITERATIONS}$${salt}$${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const parts = String(storedHash ?? '').split('$');
+
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') {
+    return false;
+  }
+
+  const iterations = Number(parts[1]);
+  const salt = parts[2];
+  const expectedHash = parts[3];
+
+  if (!Number.isInteger(iterations) || !salt || !expectedHash) {
+    return false;
+  }
+
+  const actual = crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256');
+  const expected = Buffer.from(expectedHash, 'hex');
+
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function createSessionToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function getBearerToken(request) {
+  const header = request.get('Authorization') ?? '';
+  const [scheme, token] = header.split(' ');
+  return scheme === 'Bearer' && token ? token : '';
+}
+
+function validateAuthPayload(payload, mode) {
+  const identifier = normalizeInput(payload.identifier ?? payload.email ?? payload.username).toLowerCase();
+  const email = normalizeInput(payload.email).toLowerCase();
+  const password = String(payload.password ?? '');
+  const name = normalizeInput(payload.name);
+  const role = normalizeInput(payload.role).toLowerCase();
+  const username = normalizeInput(payload.username).toLowerCase();
+  const doctorId = normalizeInput(payload.doctorId);
+  const hospitalId = normalizeInput(payload.hospitalId);
+  const pharmacyId = normalizeInput(payload.pharmacyId);
+  const mohId = normalizeInput(payload.mohId);
+
+  if (mode === 'login') {
+    if (!identifier) {
+      return { error: 'Email or username is required.' };
+    }
+  } else if (!email || !email.includes('@')) {
+    return { error: 'Valid email is required.' };
+  }
+
+  if (password.length < 6) {
+    return { error: 'Password must be at least 6 characters.' };
+  }
+
+  if (mode === 'register') {
+    if (!name) {
+      return { error: 'Full name is required.' };
+    }
+
+    if (!username || !/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username)) {
+      return { error: 'Username must be 3-32 characters and use letters, numbers, dots, underscores, or hyphens.' };
+    }
+
+    if (!AUTH_ROLES.has(role)) {
+      return { error: 'Role must be pharmacy, doctor, or moh.' };
+    }
+  }
+
+  return {
+    userInput: {
+      identifier,
+      email,
+      password,
+      name,
+      role,
+      username,
+      doctorId,
+      hospitalId,
+      pharmacyId,
+      mohId
+    }
+  };
+}
+
+async function createAuthSession(db, user) {
+  const token = createSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  await db.createSession({
+    token,
+    userId: user.id,
+    expiresAt
+  });
+
+  return {
+    token,
+    expiresAt
+  };
+}
+
+function toWholeNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : fallback;
+}
+
+function normalizePrescriptionItem(item, index, fallback = {}) {
+  const source = item ?? {};
+  const drugName = normalizeInput(source.drugName ?? source.antibioticName ?? source.drug ?? source.antibiotic ?? fallback.antibioticName ?? fallback.drugName);
+  const drugClass = normalizeInput(source.drugClass ?? source.antibioticClass ?? fallback.antibioticClass ?? fallback.drugClass);
+  const quantityLimit = toWholeNumber(source.quantityLimit ?? source.quantity ?? fallback.quantityLimit);
+  const dispensedQuantity = Math.min(toWholeNumber(source.dispensedQuantity ?? 0), quantityLimit || Number.MAX_SAFE_INTEGER);
+
+  return {
+    itemId: normalizeInput(source.itemId ?? source.id) || `ITEM-${index + 1}`,
+    drugName,
+    antibioticName: drugName,
+    drugClass,
+    antibioticClass: drugClass,
+    dosage: normalizeInput(source.dosage ?? fallback.dosage),
+    quantityLimit,
+    dispensedQuantity,
+    remainingQuantity: Math.max(quantityLimit - dispensedQuantity, 0),
+    treatmentDurationDays: toWholeNumber(source.treatmentDurationDays ?? fallback.treatmentDurationDays, 1) || 1,
+    expiryDate: normalizeInput(source.expiryDate ?? fallback.expiryDate),
+    prescriptionStatus: source.prescriptionStatus ?? fallback.prescriptionStatus ?? PRESCRIPTION_STATUS.VALID
+  };
+}
+
+function normalizePrescriptionItems(payload) {
+  const rawItems = Array.isArray(payload.items) ? payload.items : [];
+  const sourceItems = rawItems.length > 0 ? rawItems : [payload];
+
+  return sourceItems
+    .map((item, index) => normalizePrescriptionItem(item, index, payload))
+    .filter((item) => item.drugName || item.drugClass || item.dosage || item.quantityLimit > 0);
+}
+
+function summarizePrescriptionItems(items) {
+  const names = items.map((item) => item.drugName).filter(Boolean);
+  return names.length > 1 ? `${names.length} medicines: ${names.join(', ')}` : names[0] ?? '';
+}
+
+function normalizeSearchText(value) {
+  return normalizeInput(value).toLowerCase();
+}
+
+function searchDiagnosisSuggestions(query) {
+  const normalized = normalizeSearchText(query);
+
+  if (!normalized || normalized.length < 2) {
+    return ICD10_SUGGESTIONS.slice(0, 8);
+  }
+
+  return ICD10_SUGGESTIONS
+    .filter((item) => {
+      return item.code.toLowerCase().includes(normalized) ||
+        item.label.toLowerCase().includes(normalized) ||
+        item.terms.some((term) => term.includes(normalized) || normalized.includes(term));
+    })
+    .slice(0, 8);
+}
+
+function daysBetweenNow(timestamp) {
+  const time = new Date(timestamp).getTime();
+
+  if (!Number.isFinite(time)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.floor((Date.now() - time) / (24 * 60 * 60 * 1000));
+}
+
+function collectKnownAllergies(prescription, patientHistory) {
+  return [
+    prescription?.drugAllergies,
+    ...(patientHistory?.prescriptions ?? []).map((item) => item.drugAllergies)
+  ]
+    .map(normalizeInput)
+    .filter(Boolean);
+}
+
+function collectHistoryEvents(patientHistory) {
+  const prescriptions = (patientHistory?.prescriptions ?? []).flatMap((prescription) => {
+    return normalizePrescriptionItems(prescription).map((item) => ({
+      type: 'prescription',
+      timestamp: prescription.createdAt ?? prescription.expiryDate,
+      prescriptionId: prescription.prescriptionId,
+      hospitalName: prescription.hospitalName,
+      drugName: item.drugName,
+      drugClass: item.drugClass,
+      dosage: item.dosage
+    }));
+  });
+  const transactions = (patientHistory?.transactions ?? []).map((transaction) => ({
+    type: 'dispense',
+    timestamp: transaction.timestamp,
+    prescriptionId: transaction.prescriptionId,
+    hospitalName: transaction.hospitalName,
+    drugName: transaction.antibiotic,
+    drugClass: transaction.antibioticClass,
+    dosage: transaction.dosage,
+    status: transaction.status
+  }));
+
+  return [...prescriptions, ...transactions]
+    .filter((event) => normalizeInput(event.drugName) || normalizeInput(event.drugClass))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+function createClinicalDecisionSupport(prescription, patientHistory) {
+  const items = normalizePrescriptionItems(prescription);
+  const warnings = [];
+  const knownAllergies = collectKnownAllergies(prescription, patientHistory);
+  const allergyText = knownAllergies.join(' | ').toLowerCase();
+  const historyEvents = collectHistoryEvents(patientHistory);
+  const recentEvents = historyEvents.filter((event) => daysBetweenNow(event.timestamp) <= ANTIBIOTIC_HISTORY_WINDOW_DAYS);
+
+  items.forEach((item) => {
+    const drugName = normalizeSearchText(item.drugName);
+    const drugClass = normalizeSearchText(item.drugClass);
+
+    if (drugName && allergyText.includes(drugName)) {
+      warnings.push({
+        severity: 'high',
+        code: 'DRUG_ALLERGY_MATCH',
+        message: `Allergy history directly mentions ${item.drugName}. Review before saving or dispensing.`
+      });
+    }
+
+    RISK_CLASS_RULES.forEach((rule) => {
+      const hasAllergyTerm = rule.allergyTerms.some((term) => allergyText.includes(term));
+
+      if (!hasAllergyTerm || !drugClass) {
+        return;
+      }
+
+      if (rule.exactClasses.some((className) => drugClass.includes(className))) {
+        warnings.push({
+          severity: 'high',
+          code: 'ALLERGY_CLASS_MATCH',
+          message: `${rule.message} Current item: ${item.drugName} (${item.drugClass}).`
+        });
+        return;
+      }
+
+      if (rule.relatedClasses.some((className) => drugClass.includes(className))) {
+        warnings.push({
+          severity: 'medium',
+          code: 'ALLERGY_RELATED_CLASS',
+          message: `${rule.message} Current item: ${item.drugName} (${item.drugClass}).`
+        });
+      }
+    });
+
+    const repeatedDrug = recentEvents.find((event) => normalizeSearchText(event.drugName) === drugName);
+    const repeatedClass = recentEvents.find((event) => normalizeSearchText(event.drugClass) === drugClass && daysBetweenNow(event.timestamp) <= REPEAT_CLASS_WINDOW_DAYS);
+
+    if (repeatedDrug) {
+      warnings.push({
+        severity: 'medium',
+        code: 'RECENT_SAME_DRUG',
+        message: `${item.drugName} appears in this patient's recent antibiotic history. Last record: ${repeatedDrug.prescriptionId || 'N/A'}.`
+      });
+    } else if (repeatedClass) {
+      warnings.push({
+        severity: 'low',
+        code: 'RECENT_SAME_CLASS',
+        message: `${item.drugClass} appears in the last ${REPEAT_CLASS_WINDOW_DAYS} days. Review repeated class exposure.`
+      });
+    }
+  });
+
+  if (recentEvents.length >= 3) {
+    warnings.push({
+      severity: 'medium',
+      code: 'FREQUENT_ANTIBIOTIC_HISTORY',
+      message: `Patient has ${recentEvents.length} antibiotic record(s) in the last ${ANTIBIOTIC_HISTORY_WINDOW_DAYS} days. Review timeline before prescribing.`
+    });
+  }
+
+  const uniqueWarnings = warnings.filter((warning, index) => {
+    return warnings.findIndex((item) => item.code === warning.code && item.message === warning.message) === index;
+  });
+
+  return {
+    warnings: uniqueWarnings,
+    warningCount: uniqueWarnings.length,
+    hasHighRisk: uniqueWarnings.some((warning) => warning.severity === 'high'),
+    knownAllergies,
+    recentAntibioticCount: recentEvents.length,
+    recentEvents: recentEvents.slice(0, 12)
+  };
+}
+
+function sanitizePrescriptionForPharmacy(prescription) {
+  if (!prescription) {
+    return null;
+  }
+
+  const items = normalizePrescriptionItems(prescription);
+  const firstItem = items[0] ?? normalizePrescriptionItem({}, 0, prescription);
+
+  return {
+    prescriptionId: prescription.prescriptionId,
+    doctorId: prescription.doctorId,
+    hospitalId: prescription.hospitalId,
+    patientId: prescription.patientId,
+    hospitalName: prescription.hospitalName,
+    prescriberLicense: prescription.prescriberLicense,
+    itemCount: items.length,
+    itemSummary: summarizePrescriptionItems(items),
+    items,
+    drugName: firstItem.drugName,
+    antibioticName: firstItem.drugName,
+    drugClass: firstItem.drugClass,
+    antibioticClass: firstItem.drugClass,
+    dosage: firstItem.dosage,
+    quantityLimit: firstItem.quantityLimit,
+    dispensedQuantity: firstItem.dispensedQuantity ?? 0,
+    remainingQuantity: firstItem.remainingQuantity ?? firstItem.quantityLimit,
+    treatmentDurationDays: firstItem.treatmentDurationDays,
+    expiryDate: firstItem.expiryDate,
+    totalQuantityLimit: prescription.totalQuantityLimit,
+    totalDispensedQuantity: prescription.totalDispensedQuantity,
+    totalRemainingQuantity: prescription.totalRemainingQuantity,
+    prescriptionStatus: prescription.prescriptionStatus
+  };
+}
+
+function canManagePrescription(user, prescription) {
+  const doctorId = sanitizeUser(user)?.doctorId;
+  return user.role === 'moh' || prescription.doctorId === user.username || prescription.doctorId === doctorId;
+}
+
+function isFreshCache(cached) {
+  if (!cached?.fetchedAt) {
+    return false;
+  }
+
+  return Date.now() - new Date(cached.fetchedAt).getTime() < CACHE_TTL_MS;
+}
+
+function uniqueMedicineResults(results) {
+  const seen = new Set();
+
+  return results
+    .filter((item) => item?.name)
+    .map((item) => ({
+      name: normalizeInput(item.name),
+      source: item.source,
+      detail: item.detail ?? ''
+    }))
+    .filter((item) => {
+      const key = item.name.toLowerCase();
+
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 12);
+}
+
+async function fallbackMedicineSearch(db, query) {
+  const normalized = query.toLowerCase();
+  const configuredDrugs = await db.getReferenceList('drugs');
+  const drugs = configuredDrugs.length > 0 ? configuredDrugs : FALLBACK_DRUGS;
+  const commonDrugs = COMMON_DRUG_SUGGESTIONS.filter((name) => {
+    return drugs.some((drug) => drug.toLowerCase() === name.toLowerCase());
+  });
+
+  if (normalized.length < 2) {
+    return [...commonDrugs, ...drugs.filter((name) => {
+      return !commonDrugs.some((common) => common.toLowerCase() === name.toLowerCase());
+    })].slice(0, 8).map((name) => ({
+      name,
+      source: 'fallback',
+      detail: 'Configured drug list'
+    }));
+  }
+
+  const matches = drugs.filter((name) => {
+    return name.toLowerCase().includes(normalized);
+  });
+  const sortedMatches = matches.sort((a, b) => {
+    const aCommon = commonDrugs.some((name) => name.toLowerCase() === a.toLowerCase()) ? 0 : 1;
+    const bCommon = commonDrugs.some((name) => name.toLowerCase() === b.toLowerCase()) ? 0 : 1;
+    const aPrefix = a.toLowerCase().startsWith(normalized) ? 0 : 1;
+    const bPrefix = b.toLowerCase().startsWith(normalized) ? 0 : 1;
+
+    return aCommon - bCommon || aPrefix - bPrefix || a.localeCompare(b);
+  });
+
+  return (sortedMatches.length > 0 ? sortedMatches : commonDrugs).slice(0, 8).map((name) => ({
+    name,
+    source: 'fallback',
+    detail: 'Configured drug list'
+  }));
+}
+
+async function searchOpenFda(query) {
+  const search = `openfda.generic_name:${query}* OR openfda.brand_name:${query}*`;
+  const url = new URL('https://api.fda.gov/drug/label.json');
+  url.searchParams.set('search', search);
+  url.searchParams.set('limit', '8');
+
+  if (process.env.OPENFDA_API_KEY) {
+    url.searchParams.set('api_key', process.env.OPENFDA_API_KEY);
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw new Error(`openFDA request failed with ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  return uniqueMedicineResults(
+    (data.results ?? []).flatMap((result) => {
+      const openfda = result.openfda ?? {};
+      const names = [
+        ...(openfda.generic_name ?? []),
+        ...(openfda.brand_name ?? [])
+      ];
+
+      return names.map((name) => ({
+        name,
+        source: 'openFDA',
+        detail: openfda.manufacturer_name?.[0] ?? 'FDA drug label'
+      }));
+    })
+  );
+}
+
+async function searchRxNorm(query) {
+  const url = new URL('https://rxnav.nlm.nih.gov/REST/drugs.json');
+  url.searchParams.set('name', query);
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`RxNorm request failed with ${response.status}`);
+  }
+
+  const data = await response.json();
+  const groups = data.drugGroup?.conceptGroup ?? [];
+
+  return uniqueMedicineResults(
+    groups.flatMap((group) => {
+      return (group.conceptProperties ?? []).map((concept) => ({
+        name: concept.name,
+        source: 'RxNorm',
+        detail: concept.synonym || concept.tty || 'RxNorm concept'
+      }));
+    })
+  );
+}
+
+async function searchMedicines(db, query) {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (normalizedQuery.length < 2) {
+    return {
+      source: 'fallback',
+      results: await fallbackMedicineSearch(db, normalizedQuery)
+    };
+  }
+
+  const cached = await db.getMedicineCache(normalizedQuery);
+
+  if (isFreshCache(cached)) {
+    return {
+      source: cached.source,
+      results: cached.payload
+    };
+  }
+
+  try {
+    const openFdaResults = await searchOpenFda(normalizedQuery);
+
+    if (openFdaResults.length > 0) {
+      await db.saveMedicineCache(normalizedQuery, 'openFDA', openFdaResults);
+      return {
+        source: 'openFDA',
+        results: openFdaResults
+      };
+    }
+  } catch (error) {
+    console.warn(error.message);
+  }
+
+  try {
+    const rxNormResults = await searchRxNorm(normalizedQuery);
+
+    if (rxNormResults.length > 0) {
+      await db.saveMedicineCache(normalizedQuery, 'RxNorm', rxNormResults);
+      return {
+        source: 'RxNorm',
+        results: rxNormResults
+      };
+    }
+  } catch (error) {
+    console.warn(error.message);
+  }
+
+  const fallback = await fallbackMedicineSearch(db, normalizedQuery);
+  await db.saveMedicineCache(normalizedQuery, 'fallback', fallback);
+
+  return {
+    source: 'fallback',
+    results: fallback
+  };
+}
+
+function evaluateRequiredFields({
+  prescriptionId,
+  quantity
+}) {
+  if (!prescriptionId || !quantity) {
+    return 'Missing required dispense fields.';
+  }
+
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return 'Quantity must be a positive whole number.';
+  }
+  return null;
+}
+
+async function evaluateTransaction(db, payload) {
+  const prescriptionId = normalizeInput(payload.prescriptionId);
+  const itemId = normalizeInput(payload.itemId);
+  const patientId = normalizeInput(payload.patientId);
+  const hospitalId = normalizeInput(payload.hospitalId);
+  const hospitalName = normalizeInput(payload.hospitalName);
+  const prescriberLicense = normalizeInput(payload.prescriberLicense);
+  const antibiotic = normalizeInput(payload.drugName ?? payload.drug ?? payload.antibiotic);
+  const antibioticClass = normalizeInput(payload.drugClass ?? payload.antibioticClass);
+  const dosage = normalizeInput(payload.dosage);
+  const quantity = Number(payload.quantity);
+  const treatmentDurationDays = Number(payload.treatmentDurationDays);
+
+  const missingReason = evaluateRequiredFields({
+    prescriptionId,
+    quantity
+  });
+
+  if (missingReason) {
+    return {
+      prescriptionId,
+      itemId,
+      patientId,
+      hospitalId,
+      hospitalName,
+      prescriberLicense,
+      antibiotic,
+      antibioticClass,
+      dosage,
+      quantity: Number.isFinite(quantity) ? quantity : null,
+      treatmentDurationDays: Number.isFinite(treatmentDurationDays) ? treatmentDurationDays : null,
+      prescriptionStatus: PRESCRIPTION_STATUS.INVALID,
+      status: 'Blocked',
+      reason: missingReason
+    };
+  }
+
+  const prescription = await db.findPrescriptionById(prescriptionId);
+  const prescriptionItems = prescription ? normalizePrescriptionItems(prescription) : [];
+  let selectedItem = null;
+
+  if (prescription) {
+    if (itemId) {
+      selectedItem = prescriptionItems.find((item) => item.itemId.toLowerCase() === itemId.toLowerCase()) ?? null;
+    } else if (prescriptionItems.length === 1) {
+      selectedItem = prescriptionItems[0];
+    } else if (antibiotic) {
+      const matches = prescriptionItems.filter((item) => item.drugName.toLowerCase() === antibiotic.toLowerCase());
+      selectedItem = matches.length === 1 ? matches[0] : null;
+    }
+  }
+
+  const transactionRecord = {
+    prescriptionId,
+    itemId: selectedItem?.itemId || itemId || '',
+    patientId: patientId || prescription?.patientId || '',
+    hospitalId: hospitalId || prescription?.hospitalId || '',
+    hospitalName: hospitalName || prescription?.hospitalName || '',
+    prescriberLicense: prescriberLicense || prescription?.prescriberLicense || '',
+    antibiotic: antibiotic || selectedItem?.drugName || prescription?.antibioticName || '',
+    antibioticClass: antibioticClass || selectedItem?.drugClass || prescription?.antibioticClass || '',
+    dosage: dosage || selectedItem?.dosage || prescription?.dosage || '',
+    quantity,
+    treatmentDurationDays: Number.isFinite(treatmentDurationDays) ? treatmentDurationDays : selectedItem?.treatmentDurationDays ?? prescription?.treatmentDurationDays ?? null
+  };
+
+  if (!prescription) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.INVALID,
+      status: 'Blocked',
+      reason: 'Prescription ID was not found.'
+    };
+  }
+
+  if (!selectedItem) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: itemId
+        ? 'Medicine item ID was not found in this prescription.'
+        : 'Multiple medicines in this prescription. Select a medicine item before dispensing.'
+    };
+  }
+
+  if (prescription.prescriptionStatus === PRESCRIPTION_STATUS.EXPIRED) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.EXPIRED,
+      status: 'Blocked',
+      reason: 'Prescription status is Expired.'
+    };
+  }
+
+  if (prescription.prescriptionStatus === PRESCRIPTION_STATUS.CANCELLED) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.CANCELLED,
+      status: 'Blocked',
+      reason: 'Prescription status is Cancelled.'
+    };
+  }
+
+  if (prescription.prescriptionStatus === PRESCRIPTION_STATUS.FULLY_DISPENSED) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.FULLY_DISPENSED,
+      status: 'Blocked',
+      reason: 'Prescription status is Fully Dispensed.'
+    };
+  }
+
+  if (selectedItem.prescriptionStatus === PRESCRIPTION_STATUS.EXPIRED) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.EXPIRED,
+      status: 'Blocked',
+      reason: 'Medicine item status is Expired.'
+    };
+  }
+
+  if (selectedItem.prescriptionStatus === PRESCRIPTION_STATUS.FULLY_DISPENSED) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: PRESCRIPTION_STATUS.FULLY_DISPENSED,
+      status: 'Blocked',
+      reason: 'Medicine item status is Fully Dispensed.'
+    };
+  }
+
+  if (
+    (patientId && prescription.patientId !== patientId) ||
+    (hospitalId && prescription.hospitalId && prescription.hospitalId.toLowerCase() !== hospitalId.toLowerCase()) ||
+    (prescriberLicense && prescription.prescriberLicense && prescription.prescriberLicense !== prescriberLicense) ||
+    (hospitalName && prescription.hospitalName.toLowerCase() !== hospitalName.toLowerCase())
+  ) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: 'Patient, hospital, or prescriber does not match prescription record.'
+    };
+  }
+
+  if (antibiotic && selectedItem.drugName.toLowerCase() !== antibiotic.toLowerCase()) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: `Drug does not match prescription drug ${selectedItem.drugName}.`
+    };
+  }
+
+  if (antibioticClass && selectedItem.drugClass.toLowerCase() !== antibioticClass.toLowerCase()) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: `Drug class does not match prescription class ${selectedItem.drugClass}.`
+    };
+  }
+
+  if (dosage && selectedItem.dosage.toLowerCase() !== dosage.toLowerCase()) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: `Dosage does not match prescription dosage ${selectedItem.dosage}.`
+    };
+  }
+
+  if (quantity > selectedItem.remainingQuantity) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: `Dispense quantity exceeds remaining quantity of ${selectedItem.remainingQuantity}.`
+    };
+  }
+
+  if (Number.isFinite(treatmentDurationDays) && treatmentDurationDays > selectedItem.treatmentDurationDays) {
+    return {
+      ...transactionRecord,
+      prescriptionStatus: prescription.prescriptionStatus,
+      status: 'Blocked',
+      reason: `Treatment duration exceeds prescription duration of ${selectedItem.treatmentDurationDays} days.`
+    };
+  }
+
+  return {
+    ...transactionRecord,
+    prescriptionStatus: prescription.prescriptionStatus,
+    status: 'Approved',
+    reason: 'Prescription verified.'
+  };
+}
+
+function applyAuditedOverride(evaluated, payload) {
+  const overrideRequested = payload.overrideBlocked === true || payload.overrideBlocked === 'true' || payload.overrideBlocked === 'on';
+
+  if (evaluated.status !== 'Blocked' || !overrideRequested) {
+    return evaluated;
+  }
+
+  const overrideReason = normalizeInput(payload.overrideReason);
+  const pharmacistLicense = normalizeInput(payload.pharmacistLicense);
+
+  if (!overrideReason || !pharmacistLicense) {
+    return {
+      ...evaluated,
+      reason: `${evaluated.reason} Override requires a pharmacist license and reason.`
+    };
+  }
+
+  return {
+    ...evaluated,
+    status: 'Overridden',
+    reason: `Blocked rule overridden after pharmacist attestation: ${evaluated.reason}`,
+    overrideReason,
+    pharmacistLicense,
+    overrideAt: new Date().toISOString()
+  };
+}
+
+function validatePrescriptionPayload(payload) {
+  const prescriptionId = normalizeInput(payload.prescriptionId);
+  const patientId = normalizeInput(payload.patientId);
+  const hospitalId = normalizeInput(payload.hospitalId);
+  const hospitalName = normalizeInput(payload.hospitalName);
+  const prescriberLicense = normalizeInput(payload.prescriberLicense);
+  const mainDiagnosis = normalizeInput(payload.mainDiagnosis);
+  const icd10Code = normalizeInput(payload.icd10Code);
+  const clinicalNotes = normalizeInput(payload.clinicalNotes);
+  const drugAllergies = normalizeInput(payload.drugAllergies);
+  const items = normalizePrescriptionItems(payload).map((item, index) => ({
+    ...item,
+    itemId: item.itemId || `ITEM-${index + 1}`
+  }));
+  const firstItem = items[0];
+
+  if (
+    !prescriptionId ||
+    !patientId ||
+    !hospitalName ||
+    items.length === 0
+  ) {
+    return {
+      error: 'Missing required prescription fields.'
+    };
+  }
+
+  for (const item of items) {
+    if (!item.drugName || !item.drugClass || !item.dosage || !item.quantityLimit || !item.treatmentDurationDays || !item.expiryDate) {
+      return {
+        error: 'Each medicine item requires drug, class, dosage, quantity, duration, and expiry date.'
+      };
+    }
+
+    if (!Number.isInteger(item.quantityLimit) || item.quantityLimit <= 0) {
+      return {
+        error: 'Quantity limit must be a positive whole number.'
+      };
+    }
+
+    if (!Number.isInteger(item.treatmentDurationDays) || item.treatmentDurationDays <= 0) {
+      return {
+        error: 'Treatment duration must be a positive whole number.'
+      };
+    }
+
+    if (Number.isNaN(new Date(item.expiryDate).getTime())) {
+      return {
+        error: 'Expiry date must be a valid date.'
+      };
+    }
+  }
+
+  return {
+    prescription: {
+      prescriptionId,
+      patientId,
+      hospitalId,
+      hospitalName,
+      prescriberLicense,
+      antibioticName: firstItem.drugName,
+      antibioticClass: firstItem.drugClass,
+      dosage: firstItem.dosage,
+      quantityLimit: firstItem.quantityLimit,
+      treatmentDurationDays: firstItem.treatmentDurationDays,
+      expiryDate: firstItem.expiryDate,
+      items,
+      mainDiagnosis,
+      icd10Code,
+      clinicalNotes,
+      drugAllergies
+    }
+  };
+}
+
+function validateReferenceCategory(category) {
+  if (!REFERENCE_CATEGORIES.has(category)) {
+    return null;
+  }
+
+  return normalizeReferenceCategory(category);
+}
+
+export async function createApp(options = {}) {
+  const db = options.db ?? (await createDatabase(options.database));
+  const app = express();
+  const requireAuth = (allowedRoles = []) => {
+    return async (request, response, next) => {
+      try {
+        const token = getBearerToken(request);
+
+        if (!token) {
+          response.status(401).json({ error: 'Authentication required.' });
+          return;
+        }
+
+        const user = await db.findUserBySessionToken(token);
+
+        if (!user) {
+          response.status(401).json({ error: 'Session expired or invalid.' });
+          return;
+        }
+
+        if (allowedRoles.length > 0 && !allowedRoles.includes(user.role)) {
+          response.status(403).json({ error: 'You do not have access to this portal.' });
+          return;
+        }
+
+        request.user = user;
+        request.authToken = token;
+        next();
+      } catch (error) {
+        next(error);
+      }
+    };
+  };
+
+  app.locals.db = db;
+
+  app.use(express.json());
+  app.use('/vendor/jsqr', express.static(JSQR_DIST_DIR));
+  app.use(express.static(PUBLIC_DIR));
+
+  app.get('/api/health', (request, response) => {
+    response.json({
+      ok: true,
+      service: 'IADSS MVP',
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.post('/api/auth/register', async (request, response, next) => {
+    try {
+      const { error, userInput } = validateAuthPayload(request.body ?? {}, 'register');
+
+      if (error) {
+        response.status(400).json({ error });
+        return;
+      }
+
+      const existingEmail = await db.findUserByEmail(userInput.email);
+      const existingUsername = await db.findUserByUsername(userInput.username);
+
+      if (existingEmail) {
+        response.status(409).json({ error: 'An account with this email already exists.' });
+        return;
+      }
+
+      if (existingUsername) {
+        response.status(409).json({ error: 'An account with this username already exists.' });
+        return;
+      }
+
+      const user = await db.createUser({
+        name: userInput.name,
+        username: userInput.username,
+        email: userInput.email,
+        role: userInput.role,
+        ...getRoleIds(userInput),
+        passwordHash: hashPassword(userInput.password)
+      });
+      const session = await createAuthSession(db, user);
+
+      response.status(201).json({
+        user: sanitizeUser(user),
+        token: session.token,
+        expiresAt: session.expiresAt
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/auth/login', async (request, response, next) => {
+    try {
+      const { error, userInput } = validateAuthPayload(request.body ?? {}, 'login');
+
+      if (error) {
+        response.status(400).json({ error });
+        return;
+      }
+
+      const user = await db.findUserByIdentifier(userInput.identifier);
+
+      if (!user || !verifyPassword(userInput.password, user.passwordHash)) {
+        response.status(401).json({ error: 'Invalid email or password.' });
+        return;
+      }
+
+      const session = await createAuthSession(db, user);
+
+      response.json({
+        user: sanitizeUser(user),
+        token: session.token,
+        expiresAt: session.expiresAt
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/auth/me', requireAuth(), (request, response) => {
+    response.json({
+      user: sanitizeUser(request.user)
+    });
+  });
+
+  app.post('/api/auth/logout', requireAuth(), async (request, response, next) => {
+    try {
+      await db.deleteSession(request.authToken);
+      response.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/prescriptions', requireAuth(['doctor', 'moh']), async (request, response, next) => {
+    try {
+      const prescriptions = await db.getPrescriptions();
+      response.json({
+        prescriptions: request.user.role === 'doctor'
+          ? prescriptions.filter((prescription) => canManagePrescription(request.user, prescription))
+          : prescriptions
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/prescriptions/:prescriptionId', requireAuth(['pharmacy', 'doctor', 'moh']), async (request, response, next) => {
+    try {
+      const prescription = await db.findPrescriptionById(request.params.prescriptionId);
+
+      if (!prescription) {
+        response.status(404).json({ error: 'Prescription ID was not found.' });
+        return;
+      }
+
+      if (request.user.role === 'doctor' && !canManagePrescription(request.user, prescription)) {
+        response.status(403).json({ error: 'You can only view prescriptions created by your account.' });
+        return;
+      }
+
+      response.json({
+        prescription: sanitizePrescriptionForPharmacy(prescription)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/prescriptions/:prescriptionId/qr', async (request, response, next) => {
+    try {
+      const prescription = await db.findPrescriptionById(request.params.prescriptionId);
+
+      if (!prescription) {
+        response.status(404).json({ error: 'Prescription ID was not found.' });
+        return;
+      }
+
+      const qrBuffer = await QRCode.toBuffer(prescription.prescriptionId, {
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        width: 320
+      });
+
+      response.setHeader('Content-Type', 'image/png');
+      response.setHeader('Cache-Control', 'no-store');
+      response.send(qrBuffer);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/clinical/diagnoses', requireAuth(['doctor', 'moh']), (request, response) => {
+    const query = normalizeInput(request.query.q);
+    response.json({
+      query,
+      suggestions: searchDiagnosisSuggestions(query)
+    });
+  });
+
+  app.get('/api/patients/:patientId/history', requireAuth(['doctor', 'moh']), async (request, response, next) => {
+    try {
+      const patientId = normalizeInput(request.params.patientId);
+
+      if (!patientId) {
+        response.status(400).json({ error: 'Patient ID is required.' });
+        return;
+      }
+
+      const history = await db.getPatientHistory(patientId);
+      response.json({
+        patientId,
+        history,
+        decisionSupport: createClinicalDecisionSupport({ patientId, items: [] }, history)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/prescriptions', requireAuth(['doctor', 'moh']), async (request, response, next) => {
+    try {
+      const { error, prescription } = validatePrescriptionPayload(request.body ?? {});
+
+      if (error) {
+        response.status(400).json({ error });
+        return;
+      }
+
+      const history = await db.getPatientHistory(prescription.patientId);
+      const decisionSupport = createClinicalDecisionSupport(prescription, history);
+
+      const saved = await db.savePrescription({
+        ...prescription,
+        hospitalId: prescription.hospitalId || sanitizeUser(request.user).hospitalId || '',
+        doctorId: sanitizeUser(request.user).doctorId || request.user.username,
+        prescriberLicense: prescription.prescriberLicense || sanitizeUser(request.user).doctorId || request.user.username
+      });
+      response.status(201).json({
+        prescription: {
+          ...saved,
+          decisionSupport
+        },
+        decisionSupport,
+        message: 'Prescription saved. Pharmacies can verify against this record.'
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/prescriptions/:prescriptionId/cancel', requireAuth(['doctor', 'moh']), async (request, response, next) => {
+    try {
+      const prescription = await db.findPrescriptionById(request.params.prescriptionId);
+
+      if (!prescription) {
+        response.status(404).json({ error: 'Prescription ID was not found.' });
+        return;
+      }
+
+      if (!canManagePrescription(request.user, prescription)) {
+        response.status(403).json({ error: 'You can only cancel prescriptions created by your account.' });
+        return;
+      }
+
+      await db.cancelPrescription(request.params.prescriptionId);
+      const cancelled = await db.findPrescriptionById(request.params.prescriptionId);
+
+      response.json({
+        prescription: cancelled,
+        message: 'Prescription cancelled.'
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/medicines/search', requireAuth(['pharmacy', 'doctor', 'moh']), async (request, response, next) => {
+    try {
+      const query = normalizeInput(request.query.q);
+      const result = await searchMedicines(db, query);
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/reference/:category', requireAuth(['pharmacy', 'doctor', 'moh']), async (request, response, next) => {
+    try {
+      const category = validateReferenceCategory(request.params.category);
+
+      if (!category) {
+        response.status(404).json({ error: 'Unknown reference category.' });
+        return;
+      }
+
+      response.json({
+        category,
+        items: await db.getReferenceList(category)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/reference/:category', requireAuth(['moh']), async (request, response, next) => {
+    try {
+      const category = validateReferenceCategory(request.params.category);
+      const value = normalizeInput(request.body?.value);
+
+      if (!category) {
+        response.status(404).json({ error: 'Unknown reference category.' });
+        return;
+      }
+
+      if (!value) {
+        response.status(400).json({ error: 'Reference value is required.' });
+        return;
+      }
+
+      await db.addReferenceItem(category, value);
+      await db.clearMedicineCache();
+      response.status(201).json({
+        category,
+        items: await db.getReferenceList(category)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/reference/:category/:value', requireAuth(['moh']), async (request, response, next) => {
+    try {
+      const category = validateReferenceCategory(request.params.category);
+      const value = normalizeInput(request.params.value);
+
+      if (!category) {
+        response.status(404).json({ error: 'Unknown reference category.' });
+        return;
+      }
+
+      await db.deleteReferenceItem(category, value);
+      await db.clearMedicineCache();
+      response.json({
+        category,
+        items: await db.getReferenceList(category)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/transactions', requireAuth(['moh']), async (request, response, next) => {
+    try {
+      response.json({
+        transactions: await db.getTransactions()
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/transactions', requireAuth(['pharmacy']), async (request, response, next) => {
+    try {
+      const evaluated = applyAuditedOverride(await evaluateTransaction(db, request.body ?? {}), request.body ?? {});
+      evaluated.pharmacyId = sanitizeUser(request.user).pharmacyId || request.user.username;
+      const saved = await db.saveTransaction(evaluated);
+
+      if (saved.status === 'Approved') {
+        await db.addPrescriptionDispense(saved.prescriptionId, saved.quantity, saved.itemId);
+      }
+
+      response.status(201).json({
+        transaction: saved,
+        message:
+          saved.status === 'Approved'
+            ? 'Transaction Approved. Data synced to MOH.'
+            : saved.status === 'Overridden'
+              ? 'AUDITED OVERRIDE: Transaction recorded for MOH review.'
+            : 'HIGH RISK ALERT: Invalid Prescription. Sale Blocked.'
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/transactions', requireAuth(['moh']), async (request, response, next) => {
+    try {
+      await db.clearTransactions();
+      response.json({
+        ok: true
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/users', requireAuth(['moh']), async (request, response, next) => {
+    try {
+      const password = String(request.body?.password ?? '');
+
+      if (password !== USER_RESET_PASSWORD) {
+        response.status(403).json({ error: 'Invalid reset password.' });
+        return;
+      }
+
+      await db.clearUsers();
+      response.json({
+        ok: true,
+        message: 'All user accounts and sessions were deleted.'
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('*', (request, response) => {
+    response.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+  });
+
+  app.use((error, request, response, next) => {
+    console.error(error);
+    response.status(500).json({
+      error: 'Internal server error'
+    });
+  });
+
+  return app;
+}
+
+async function start() {
+  const app = await createApp();
+  const port = Number(process.env.PORT ?? 3000);
+
+  app.listen(port, () => {
+    console.log(`IADSS MVP running at http://localhost:${port}`);
+  });
+}
+
+const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMainModule) {
+  start().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
