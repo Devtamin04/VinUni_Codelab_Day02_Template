@@ -50,11 +50,11 @@ Trong buổi Lab hôm nay, nhóm của bạn sẽ đóng vai trò là **AI Produ
 Hãy sử dụng **4 Lenses** dưới đây để quét qua hoạt động vận hành của các công ty thành viên Vingroup. Ghi lại **ít nhất 5 bài toán/bottleneck** thực tế.
 
 ### 4 Lenses tìm bài toán AI cho Vingroup:
-1. **Lặp lại (Repetitive):** Tác vụ lặp đi lặp lại nhiều lần hằng ngày. (Ví dụ: So khớp hóa đơn sạc điện tại VinFast, route lại chuyến taxi tại Xanh SM).
-2. **Tốn thời gian (Time-consuming):** Tác vụ ngốn thời gian xử lý thủ công của nhân viên. (Ví dụ: Soạn thảo phản hồi đánh giá 1-star của cư dân Vinhomes).
-3. **AI có thể tốt hơn (AI-upgrade):** Dịch vụ khách hàng hiện tại còn chậm hoặc phản hồi rập khuôn. (Ví dụ: Chatbot CSKH Vinpearl hỗ trợ đặt vé vui chơi).
-4. **Pain từ người khác (Stakeholder Pain):** Bottleneck khiến khách hàng hoặc nhân viên thực địa phàn nàn. (Ví dụ: Tài xế Xanh SM phàn nàn về việc hệ thống gợi ý điểm đón khách không chính xác).
-
+1. ** Vấn đề xử lý sự cố khẩn cấp thủ công (Xanh SM): Các điều phối viên đang phải tốn nhiều thời gian (mất 15-20 phút cho mỗi lượt) để xử lý thủ công các phản hồi khẩn cấp từ tài xế về sự cố sạc pin hoặc va chạm trên thực địa.
+2. ** Vấn đề đối chiếu và so khớp dữ liệu lặp đi lặp lại (VinFast & Xanh SM): Nhân sự phải làm các công việc lặp lại mang tính chất thủ công cao như so khớp hóa đơn sạc điện, đối chiếu số liệu trạm sạc với đối tác hàng tuần, hoặc so khớp và phân bổ lại cuốc xe khi khách thay đổi điểm đến giữa chừng.
+3.  **Vấn đề quá tải của bác sĩ do thủ tục hành chính (Vinmec): Các bác sĩ đang gặp áp lực lớn và phàn nàn vì quá tải khi phải mất quá nhiều thời gian (20-30 phút cho mỗi bệnh nhân) chỉ để viết tóm tắt hồ sơ xuất viện.
+4. ** Vấn đề chậm trễ trong quy trình chăm sóc khách hàng (Vinhomes): Hệ thống phân loại và chuyển tiếp (route) các phản hồi, khiếu nại của cư dân trên App Vinhomes Resident còn rập khuôn, khiến thời gian phản hồi kéo dài lên tới 12 tiếng.
+5. ** Vấn đề khó khăn trong việc khai thác dữ liệu phi cấu trúc (Xanh SM): Doanh nghiệp chưa tối ưu được việc tìm ra quy luật (pattern) lỗi hệ thống từ các nguồn dữ liệu rời rạc và không đồng nhất như cuộc gọi ghi âm tổng đài và ghi chú viết tay của tài xế khi khách hủy chuyến.
 > [!TIP]
 > **🤖 AI Prompts — Partner brainstorm:**
 > Hãy sử dụng prompt sau để brainstorm các bài toán thực tế nếu bạn chưa có ý tưởng:
@@ -63,12 +63,11 @@ Hãy sử dụng **4 Lenses** dưới đây để quét qua hoạt động vận
 ### 📝 List bài toán của tôi:
 | # | Subsidiary (VinFast/Xanh SM...) | Lens | Mô tả ngắn bài toán |
 |---|----------------------------------|------|---------------------|
-| 1 | | | |
-| 2 | | | |
-| 3 | | | |
-| 4 | | | |
-| 5 | | | |
-
+| 1 | Vấn đề quá tải của bác sĩ do thủ tục hành chính (Vinmec)|Pain từ người khác | Bác sĩ mất quá nhiều thời gian viết tóm tắt hồ sơ xuất viện (mất 20-30 phút/bệnh nhân, bác sĩ phàn nàn vì quá tải) |
+| 2 | Vấn đề đối chiếu và so khớp dữ liệu lặp đi lặp lại| Lặp lại |So khớp hóa đơn sạc điện và đối chiếu số liệu trạm sạc đối tác hằng tuần |
+| 3 | Vấn đề khó khăn trong việc khai thác dữ liệu phi cấu trúc|Tốn thời gian |Tóm tắt lý do khách hàng hủy chuyến từ cuộc gọi ghi âm và ghi chú của tài xế để tìm pattern lỗi hệ thống|
+| 4 | Xanh SM | Lặp lại| So khớp và phân bổ lại cuốc xe khi khách hàng yêu cầu thay đổi điểm đến giữa chừng. 
+| 5 | Vinhomes |  AI-upgrade | Hệ thống phân loại và route tự động các phản hồi/khiếu nại của cư dân trên App Vinhomes Resident (CSKH phản hồi rập khuôn, mất 12 tiếng). |
 ---
 
 # 🃏 Phase 2 — QUICK-ASSESS (Cá nhân, 30 min)
@@ -76,26 +75,62 @@ Hãy sử dụng **4 Lenses** dưới đây để quét qua hoạt động vận
 Chọn **top 3 bài toán** từ danh sách trên và hoàn thiện **3 Quick Problem Cards** dưới đây (10 phút/card).
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ QUICK PROBLEM CARD #___                                     │
-│                                                             │
-│ Bài toán (1 câu): ________________________________________  │
-│ Công ty thành viên: [ ] VinFast  [ ] Xanh SM  [ ] Vinhomes  │
-│                     [ ] Vinmec   [ ] Khác (Ghi rõ)________  │
-│                                                             │
-│ Ai đang đau (Actor)? ______________________________________ │
-│                                                             │
-│ Workflow thủ công hiện tại (3-5 bước):                      │
-│   1. ___ ──> 2. ___ ──> 3. ___ ──> 4. ___                   │
-│                                                             │
-│ Bước nào tốn thời gian/lỗi nhất? ___ (⏱ ___ phút/lượt)      │
-│ AI có thể nhảy vào hỗ trợ ở bước nào? _____________________ │
-│                                                             │
-│ Đo thành công bằng gì (Metric có số)? ______________________ │
-│   VD: "Giảm thời gian soạn phản hồi từ 10 min ──> under 2 min"│
-│                                                             │
-│ Quick Architecture: [ ] No AI  [ ] Rule  [ ] LLM  [ ] Agent │
-└─────────────────────────────────────────────────────────────┘
+| QUICK PROBLEM CARD #1
+| Bài toán: Bác sĩ mất quá nhiều thời gian viết tóm tắt hồ sơ xuất viện từ bệnh án thô gây quá tải hành chính.
+| Công ty thành viên: [x] Vinmec
+| Ai đang đau? Bác sĩ (quá tải), Bệnh nhân (chờ đợi)
+| Workflow thủ công hiện tại (4 bước):
+|   1. Bác sĩ đọc lại toàn bộ lịch sử bệnh án, xét nghiệm, đơn thuốc trên hệ thống
+|   -> 2. Chắt lọc các thông tin cốt lõi (triệu chứng, chẩn đoán, diễn tiến điều trị)
+|   -> 3. Gõ tay nội dung tổng hợp vào biểu mẫu hồ sơ xuất viện
+|   -> 4. Kiểm tra thuật ngữ chuyên môn và ký xác nhận
+| 
+| Bước nào tốn nhất? Bước 2-3 ( 20-30 phút/lượt)
+| AI có thể nhảy vào hỗ trợ ở bước nào? Bước 2-3
+| (Tự động đọc bệnh án -> Trích xuất thông tin -> Draft sẵn văn bản tóm tắt xuất viện)
+| Đo thành công bằng gì (Metric có số)?
+| Giảm thời gian viết hồ sơ xuất viện từ 25 phút -> dưới 5 phút.
+| Quick Architecture: [x] LLM Feature (Tự động tóm tắt văn bản y tế)
+─┘
+| QUICK PROBLEM CARD #2
+| Bài toán: So khớp hóa đơn sạc điện và đối chiếu số liệu trạm sạc với đối tác hàng tuần lặp đi lặp lại.
+| Công ty thành viên: [x] VinFast
+| Ai đang đau? Nhân viên kế toán, Nhân viên đối soát dữ liệu (tốn công, dễ sai số)
+| Workflow thủ công hiện tại (4 bước):
+|   1. Tải dữ liệu hóa đơn sạc từ hệ thống nội bộ VinFast xuống file Excel
+|   -> 2. Nhận file báo cáo số liệu trạm sạc từ phía đối tác gửi về hàng tuần
+|   -> 3. Dùng hàm Excel hoặc dò tay đối chiếu mã trạm, số kWh, số tiền giữa 2 nguồn
+|   -> 4. Lọc ra các dòng bất thường chênh lệch để gửi yêu cầu xác minh
+| 
+| Bước nào tốn nhất? Bước 3 ( Nhiều giờ/mỗi chu kỳ đối soát)
+| AI có thể nhảy vào hỗ trợ ở bước nào? Bước 3
+| (Tự động tải dữ liệu -> So khớp tự động 100% dòng -> Cảnh báo các dòng sai lệch)
+| 
+| Đo thành công bằng gì (Metric có số)?
+| Giảm thời gian đối soát từ nhiều giờ -> dưới 1 phút (Tự động hóa hoàn toàn).
+| 
+| Quick Architecture: [x] RULE / Script (Vì logic rõ ràng, dữ liệu bảng ổn định)
+ QUICK PROBLEM CARD #3
+| Bài toán: Khó khăn tìm pattern lỗi hệ thống từ cuộc gọi ghi âm và ghi chú tài xế khi khách hủy chuyến.
+| Công ty thành viên: [x] Xanh SM (GSM)
+| 
+| Ai đang đau? Đội ngũ Phát triển Sản phẩm, Đội Quản lý Chất lượng Vận hành (Mất dấu lỗi)
+| 
+| Workflow thủ công hiện tại (4 bước):
+|   1. Xuất file ghi âm cuộc gọi hủy và file text ghi chú của tài xế trên app
+|   -> 2. Nghe ngẫu nhiên cuộc gọi hoặc đọc lướt qua các đoạn ghi chú ngắn
+|   -> 3. Nhân viên tự phân loại thủ công các lý do lỗi (lỗi app, định vị, thanh toán...)
+|   -> 4. Tổng hợp số liệu lên báo cáo tuần để gửi đội Tech xử lý
+| 
+| Bước nào tốn nhất? Bước 2-3 (Không thể làm trên diện rộng vì số lượng cuốc hủy quá lớn)
+| AI có thể nhảy vào hỗ trợ ở bước nào? Bước 2-3
+| (Chuyển giọng nói cuộc gọi thành text -> Phân tích ngữ nghĩa -> Tự động gắn tag lý do)
+| 
+| Đo thành công bằng gì (Metric có số)?
+| Tăng tỷ lệ phân tích và phân loại lý do hủy chuyến từ 5% mẫu thử -> 100% tổng số ca.
+| 
+| Quick Architecture: [x] LLM Feature (Trích xuất đặc trưng và phân loại dữ liệu phi cấu trúc)
+
 ```
 
 > [!TIP]
