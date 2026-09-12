@@ -117,6 +117,14 @@ AI phát hiện một mâu thuẫn:
 
 Quyết định của tôi là không sửa autograder và không cố đưa các từ khóa Xanh SM vào prompt IADSS để “lách” bài chấm. File `starter-code/prompt_prototype.py` tiếp tục thực hiện đúng use case mà giảng viên cung cấp. IADSS được dùng để thể hiện năng lực scoping và phân tích AI Fit trong tài liệu cá nhân.
 
+### Lần 8 — Xây dựng bộ trích xuất bệnh án `.txt`
+
+Ngày **12/09/2026**, tôi cung cấp hai ghi chú khám bệnh tiếng Việt (`1.txt`, `10.txt`) và yêu cầu AI thiết kế luồng upload vào Doctor Portal. AI đề xuất dùng trình duyệt đọc file văn bản rồi gửi JSON `{ "text": "..." }` tới backend, tránh thêm thư viện upload không cần thiết.
+
+Prompt Ollama được sửa để trích xuất tên thuốc, chẩn đoán/mã ICD-10, bệnh nền, bệnh sử gia đình, triệu chứng và tên bệnh dự đoán. Các ranh giới được giữ nguyên: nội dung file chỉ là dữ liệu, không phải chỉ dẫn; không tự bịa mã; bệnh dự đoán chỉ là candidate; output luôn là `[DRAFT_ONLY]`; bác sĩ phải review trước khi lưu.
+
+Backend gọi model mặc định `gpt-oss:20b` qua `/api/chat`. API key có thể nhập vào ô password cho từng phiên trình duyệt hoặc đọc từ `OLLAMA_API_KEY`; key không được lưu vào source, localStorage hay database. Sáu boundary test dùng mock đã kiểm tra quyền Doctor/MOH, chặn Pharmacy, input rỗng/quá dài, key theo request, thiếu cấu hình và JSON model không hợp lệ.
+
 ---
 
 ## 3. Prompt refinement

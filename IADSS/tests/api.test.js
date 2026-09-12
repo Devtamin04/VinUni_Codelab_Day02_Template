@@ -8,6 +8,7 @@ import request from 'supertest';
 import { createApp } from '../server.js';
 import { createDatabase } from '../src/db.js';
 
+
 const testDbPath = path.join(os.tmpdir(), `iadss-test-${Date.now()}.json`);
 
 let app;
@@ -699,6 +700,141 @@ describe('IADSS API', () => {
     assert.equal(response.body.source, 'fallback');
     assert.ok(response.body.results.length >= 8);
     assert.ok(response.body.results.some((medicine) => medicine.name === 'Amoxicillin'));
+  });
+
+  it('lets doctors extract a draft clinical summary through Ollama', async () => {
+    const calls = [];
+    const fetchImpl = async (...args) => {
+      calls.push(args);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              status: 'DRAFT_ONLY',
+              medications: [{ name: 'metoprolol', rxnormCode: null }],
+              diagnoses: [{ name: 'Acute pharyngitis', icd10Code: 'J02.9', assertion: 'current' }],
+              comorbidities: ['Hypertension'],
+              familyHistory: [{ relative: 'Mother', condition: 'Diabetes' }],
+              symptoms: ['Palpitations'],
+              predictedDiseases: [{ name: 'Cardiac arrhythmia', evidence: ['Palpitations'], confidence: 'medium' }],
+              uncertainties: []
+            })
+          }
+        })
+      };
+    };
+    const extractionApp = await createApp({ db, fetchImpl, ollamaApiKey: 'test-key' });
+
+    const response = await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .send({ text: 'Đánh trống ngực. Đang dùng metoprolol.' })
+      .expect(200);
+
+    assert.equal(response.body.extraction.status, 'DRAFT_ONLY');
+    assert.equal(response.body.extraction.medications[0].name, 'metoprolol');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], 'https://ollama.com/api/chat');
+    assert.equal(calls[0][1].headers.Authorization, 'Bearer test-key');
+    assert.equal(JSON.parse(calls[0][1].body).model, 'gpt-oss:20b');
+  });
+
+  it('restricts clinical extraction to doctors and MOH users', async () => {
+    const extractionApp = await createApp({
+      db,
+      ollamaApiKey: 'test-key',
+      fetchImpl: async () => assert.fail('Ollama must not be called for forbidden roles.')
+    });
+
+    await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('pharmacy'))
+      .send({ text: 'Clinical note' })
+      .expect(403);
+  });
+
+  it('rejects missing and oversized clinical notes', async () => {
+    const extractionApp = await createApp({
+      db,
+      ollamaApiKey: 'test-key',
+      fetchImpl: async () => assert.fail('Ollama must not be called for invalid input.')
+    });
+
+    await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .send({ text: '   ' })
+      .expect(400);
+
+    await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .send({ text: 'x'.repeat(20001) })
+      .expect(400);
+  });
+
+  it('accepts a request-scoped Ollama key from the doctor portal', async () => {
+    let authorization = '';
+    const extractionApp = await createApp({
+      db,
+      ollamaApiKey: '',
+      fetchImpl: async (url, options) => {
+        authorization = options.headers.Authorization;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            message: {
+              content: JSON.stringify({ status: 'DRAFT_ONLY', symptoms: ['Fever'] })
+            }
+          })
+        };
+      }
+    });
+
+    const response = await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .set('X-Ollama-Api-Key', 'request-only-key')
+      .send({ text: 'Patient reports fever.' })
+      .expect(200);
+
+    assert.equal(authorization, 'Bearer request-only-key');
+    assert.deepEqual(response.body.extraction.symptoms, ['Fever']);
+  });
+
+  it('returns a service error when Ollama is not configured', async () => {
+    const extractionApp = await createApp({ db, ollamaApiKey: '' });
+
+    const response = await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .send({ text: 'Patient reports fever.' })
+      .expect(503);
+
+    assert.match(response.body.error, /Ollama API key|OLLAMA_API_KEY/);
+  });
+
+  it('returns a controlled error when Ollama sends invalid JSON', async () => {
+    const extractionApp = await createApp({
+      db,
+      ollamaApiKey: 'test-key',
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ message: { content: 'not-json' } })
+      })
+    });
+
+    const response = await request(extractionApp)
+      .post('/api/clinical/extract')
+      .set(authHeader('doctor'))
+      .send({ text: 'Patient reports fever.' })
+      .expect(502);
+
+    assert.equal(response.body.error, 'AI extraction returned an invalid response.');
   });
 
   it('lets MOH clear all users only with the reset password', async () => {

@@ -168,6 +168,12 @@
               <label><span>ICD-10 Code</span><input id="icd10Code" name="icd10Code" type="text" placeholder="Auto-suggested, e.g. J02.9" autocomplete="off"></label>
               <label class="wide-field"><span>Clinical Notes</span><textarea name="clinicalNotes" placeholder="Internal doctor notes. Not shown to pharmacy."></textarea></label>
               <label class="wide-field"><span>Drug Allergies</span><textarea id="drugAllergies" name="drugAllergies" placeholder="Known allergies. Not shown to pharmacy."></textarea></label>
+              <section class="ai-extraction-panel wide-field" id="aiExtractionPanel">
+                <div class="ai-extraction-head"><span class="material-symbols-outlined">neurology</span><div><h3>AI Clinical Note Extractor</h3><p>Upload a UTF-8 .txt examination note. AI fills a draft that must be reviewed before saving.</p></div><span class="draft-badge">[DRAFT_ONLY]</span></div>
+                <div class="ai-upload-row"><label class="ai-key-field"><span>Ollama API Key (request only)</span><input id="ollamaApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key; not stored"></label><input id="clinicalNoteFile" type="file" accept=".txt,text/plain"><button class="secondary-button" id="extractClinicalNoteButton" type="button"><span class="material-symbols-outlined">upload_file</span>AI Extract &amp; Fill</button></div>
+                <div class="support-meta" id="clinicalFileStatus">Choose a .txt file up to 20,000 characters.</div>
+                <div class="ai-extraction-result" id="clinicalExtractionResult" hidden></div>
+              </section>
               <section class="clinical-support-panel wide-field" id="clinicalSupportPanel"><div class="clinical-support-head"><span class="material-symbols-outlined">monitor_heart</span><div><h3>Clinical Decision Support</h3><p>Enter Patient ID, diagnosis, allergies, and medicines to review ICD suggestions, allergy risks, and recent antibiotic history.</p></div></div><div id="clinicalSupportBody" class="clinical-support-body"><div class="empty-cell">No patient history loaded.</div></div></section>
               <section class="medication-list wide-field" id="medicationItems">
                 <div class="medication-list-heading"><div><h3>Medicines in this prescription</h3><p>Add all medicines before sending the prescription.</p></div><button class="ghost-button" id="addMedicationButton" type="button"><span class="material-symbols-outlined">add</span>Add Medicine</button></div>

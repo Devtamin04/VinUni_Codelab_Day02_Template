@@ -76,6 +76,11 @@ const icd10CodeInput = document.querySelector('#icd10Code');
 const diagnosisSuggestions = document.querySelector('#diagnosisSuggestions');
 const drugAllergiesInput = document.querySelector('#drugAllergies');
 const clinicalSupportBody = document.querySelector('#clinicalSupportBody');
+const clinicalNoteFileInput = document.querySelector('#clinicalNoteFile');
+const ollamaApiKeyInput = document.querySelector('#ollamaApiKey');
+const extractClinicalNoteButton = document.querySelector('#extractClinicalNoteButton');
+const clinicalFileStatus = document.querySelector('#clinicalFileStatus');
+const clinicalExtractionResult = document.querySelector('#clinicalExtractionResult');
 
 let lookupTimer = null;
 let diagnosisLookupTimer = null;
@@ -646,6 +651,118 @@ function renderClinicalSupport(decisionSupport = {}, history = currentPatientHis
     <div class="support-meta">Known allergy notes: ${escapeHtml(allergyValues.join(' | ') || 'None recorded')}</div>
     ${timelineHtml}
   `;
+}
+
+function renderExtractionGroup(title, values) {
+  const items = values.filter(Boolean);
+  return `<section class="extraction-group"><strong>${escapeHtml(title)}</strong>${items.length > 0 ? `<div class="extraction-chips">${items.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : '<span class="support-meta">Not found</span>'}</section>`;
+}
+
+function renderClinicalExtraction(extraction) {
+  const diagnoses = (extraction.diagnoses ?? []).map((item) => `${item.name}${item.icd10Code ? ` (${item.icd10Code})` : ''} · ${item.assertion}`);
+  const familyHistory = (extraction.familyHistory ?? []).map((item) => `${item.relative || 'Relative'}: ${item.condition}`);
+  const predictedDiseases = (extraction.predictedDiseases ?? []).map((item) => `${item.name} · ${item.confidence} · evidence: ${(item.evidence ?? []).join(', ') || 'none'}`);
+
+  clinicalExtractionResult.hidden = false;
+  clinicalExtractionResult.innerHTML = `
+    <div class="ai-result-heading"><strong>[DRAFT_ONLY] Review before saving</strong><span>AI output is not a diagnosis or prescription.</span></div>
+    <div class="ai-result-grid">
+      ${renderExtractionGroup('Medicines', (extraction.medications ?? []).map((item) => item.name))}
+      ${renderExtractionGroup('Diagnoses / ICD-10', diagnoses)}
+      ${renderExtractionGroup('Symptoms', extraction.symptoms ?? [])}
+      ${renderExtractionGroup('Comorbidities', extraction.comorbidities ?? [])}
+      ${renderExtractionGroup('Family history', familyHistory)}
+      ${renderExtractionGroup('Predicted disease candidates', predictedDiseases)}
+      ${renderExtractionGroup('Uncertainties', extraction.uncertainties ?? [])}
+    </div>
+  `;
+}
+
+function fillMedicationNames(medications) {
+  resetMedicationItems();
+  const names = medications.map((item) => String(item?.name ?? '').trim()).filter(Boolean);
+  const firstRow = medicationItems.querySelector('[data-medication-item]');
+
+  if (names[0] && firstRow) {
+    firstRow.querySelector('[name="drugName"]').value = names[0];
+  }
+
+  names.slice(1).forEach((drugName) => addMedicationItem({ drugName }));
+}
+
+function fillClinicalExtraction(extraction, sourceText) {
+  const currentDiagnosis = (extraction.diagnoses ?? []).find((item) => item.assertion === 'current')
+    ?? (extraction.diagnoses ?? []).find((item) => item.assertion !== 'negated' && item.assertion !== 'family');
+  const predicted = (extraction.predictedDiseases ?? []).map((item) => `${item.name} (${item.confidence})`).join(', ');
+  const familyHistory = (extraction.familyHistory ?? []).map((item) => `${item.relative || 'Relative'}: ${item.condition}`).join('; ');
+  const summary = [
+    '[DRAFT_ONLY - AI EXTRACTED]',
+    `Symptoms: ${(extraction.symptoms ?? []).join(', ') || 'Not found'}`,
+    `Comorbidities: ${(extraction.comorbidities ?? []).join(', ') || 'Not found'}`,
+    `Family history: ${familyHistory || 'Not found'}`,
+    `Predicted disease candidates: ${predicted || 'Not found'}`,
+    `Uncertainties: ${(extraction.uncertainties ?? []).join('; ') || 'None stated'}`,
+    '',
+    'Original note:',
+    sourceText
+  ].join('\n');
+
+  if (currentDiagnosis) {
+    mainDiagnosisInput.value = currentDiagnosis.name;
+    icd10CodeInput.value = currentDiagnosis.icd10Code ?? '';
+  }
+
+  prescriptionForm.elements.clinicalNotes.value = summary;
+  fillMedicationNames(extraction.medications ?? []);
+  renderClinicalExtraction(extraction);
+  refreshClinicalSupport();
+}
+
+async function extractClinicalNote() {
+  const file = clinicalNoteFileInput?.files?.[0];
+
+  if (!file || !file.name.toLowerCase().endsWith('.txt')) {
+    setPrescriptionAlert('danger', 'Choose a .txt examination note first.');
+    return;
+  }
+
+  const text = await file.text();
+
+  if (!text.trim() || text.length > 20000) {
+    setPrescriptionAlert('danger', 'The .txt note must contain 1 to 20,000 characters.');
+    return;
+  }
+
+  const originalButtonHtml = extractClinicalNoteButton.innerHTML;
+  extractClinicalNoteButton.disabled = true;
+  extractClinicalNoteButton.textContent = 'AI is extracting...';
+  clinicalFileStatus.textContent = `${file.name} · ${text.length.toLocaleString()} characters`;
+  clearAlert(prescriptionAlertArea);
+
+  try {
+    const ollamaApiKey = ollamaApiKeyInput?.value.trim();
+    const response = await apiFetch('/api/clinical/extract', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(ollamaApiKey ? { 'X-Ollama-Api-Key': ollamaApiKey } : {})
+      },
+      body: JSON.stringify({ text })
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Unable to extract the clinical note.');
+    }
+
+    fillClinicalExtraction(data.extraction, text);
+    setPrescriptionAlert('success', '[DRAFT_ONLY] AI extracted the note and filled available fields.', 'Review every field before saving the prescription.');
+  } catch (error) {
+    setPrescriptionAlert('danger', 'Unable to extract the clinical note.', error.message);
+  } finally {
+    extractClinicalNoteButton.disabled = false;
+    extractClinicalNoteButton.innerHTML = originalButtonHtml;
+  }
 }
 
 async function loadPatientHistory(patientId = doctorPatientIdInput?.value) {
@@ -1479,9 +1596,20 @@ resetPrescriptionFormButton.addEventListener('click', () => {
   printPrescriptionDetails.innerHTML = '';
   qrImage.removeAttribute('src');
   currentPatientHistory = null;
+  clinicalNoteFileInput.value = '';
+  clinicalFileStatus.textContent = 'Choose a .txt file up to 20,000 characters.';
+  clinicalExtractionResult.hidden = true;
+  clinicalExtractionResult.innerHTML = '';
   renderClinicalSupport({}, null);
   clearAlert(prescriptionAlertArea);
 });
+
+clinicalNoteFileInput?.addEventListener('change', () => {
+  const file = clinicalNoteFileInput.files?.[0];
+  clinicalFileStatus.textContent = file ? `${file.name} · ready to extract` : 'Choose a .txt file up to 20,000 characters.';
+});
+
+extractClinicalNoteButton?.addEventListener('click', extractClinicalNote);
 
 addMedicationButton?.addEventListener('click', () => {
   addMedicationItem();

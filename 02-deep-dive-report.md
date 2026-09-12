@@ -354,3 +354,11 @@ Dự án chuyển về **NOT YET** nếu xảy ra một trong các trường h�
 * Phát hiện bất kỳ mã sai nào lọt qua vào hệ thống thanh toán.
 * Phát hiện bất kỳ trường hợp nào LLM ảnh hưởng tới quyết định cấp/chặn thuốc — đây là **vi phạm kiến trúc**, phải dừng ngay lập tức chứ không chỉ điều chỉnh.
 * Bộ phận pháp chế không phê duyệt quy trình khử định danh.
+
+---
+
+## Prototype triển khai ngày 12/09/2026
+
+Doctor Portal đã có luồng chọn file `.txt` và bấm **AI Extract & Fill**. Backend `POST /api/clinical/extract` gọi Ollama `gpt-oss:20b`, chuẩn hóa JSON và chỉ điền bản nháp gồm thuốc, chẩn đoán/ICD-10, bệnh nền, tiền sử gia đình, triệu chứng và candidate bệnh dự đoán. Mã không có trong văn bản hoặc danh mục ICD cục bộ bị loại; output không tự lưu đơn và luôn yêu cầu bác sĩ review.
+
+Kiểm chứng tự động gồm 6 tình huống: Doctor gọi thành công bằng mock, Pharmacy bị từ chối, input rỗng/quá 20.000 ký tự bị chặn, key nhập từ Doctor Portal được dùng cho đúng một request, thiếu key trả lỗi cấu hình và model trả JSON sai được xử lý thành lỗi kiểm soát.
